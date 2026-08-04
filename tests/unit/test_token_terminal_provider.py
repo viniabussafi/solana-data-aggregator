@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from metrics.network import Network, NetworkMetricType
+from metrics.overview import Overview, OverviewMetricType
 from metrics.stablecoin import Stablecoin, StablecoinMetricType
 from providers.token_terminal import TokenTerminal
 
@@ -117,3 +118,80 @@ def test_get_network_sol_price_returns_network_metric() -> None:
 def test_every_supported_metric_has_a_metric_type() -> None:
     """Each entry in METRIC_MAP must resolve to a typed metric model."""
     assert set(TokenTerminal.METRIC_MAP) == set(TokenTerminal.METRIC_TYPE_MAP)
+
+
+def test_get_fees_converts_usd_to_sol() -> None:
+    """Fees are published in USD and reported in SOL at that day's SOL price."""
+    provider = TokenTerminal(api_key="test-token-terminal-key")
+    mock_response = [
+        {
+            "timestamp": "2026-08-02T00:00:00.000Z",
+            "fees": 423_331.0,
+            "price": 73.45,
+        },
+    ]
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = mock_response
+    mock_resp.raise_for_status = MagicMock()
+    sentinel_metric = object()
+
+    with (
+        patch.object(provider._session, "get", return_value=mock_resp),
+        patch.object(
+            Overview, "from_metric_type", return_value=sentinel_metric
+        ) as mock_factory,
+    ):
+        result = provider.get_metric("overview_fees", "2026-08-02", "solana")
+
+    assert result is sentinel_metric
+    assert mock_factory.call_args.kwargs["metric_type"] == OverviewMetricType.FEES
+    assert mock_factory.call_args.kwargs["value"] == pytest.approx(5763.6, abs=0.1)
+
+
+def test_get_total_stake_converts_usd_to_sol() -> None:
+    """Staking market cap is published in USD and reported as staked SOL."""
+    provider = TokenTerminal(api_key="test-token-terminal-key")
+    mock_response = [
+        {
+            "timestamp": "2026-08-02T00:00:00.000Z",
+            "staking_market_cap": 32_608_524_558.0,
+            "price": 73.45,
+        },
+    ]
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = mock_response
+    mock_resp.raise_for_status = MagicMock()
+    sentinel_metric = object()
+
+    with (
+        patch.object(provider._session, "get", return_value=mock_resp),
+        patch.object(
+            Network, "from_metric_type", return_value=sentinel_metric
+        ) as mock_factory,
+    ):
+        result = provider.get_metric("network_total_stake", "2026-08-02", "solana")
+
+    assert result is sentinel_metric
+    assert mock_factory.call_args.kwargs["metric_type"] == NetworkMetricType.TOTAL_STAKE
+    assert mock_factory.call_args.kwargs["value"] == pytest.approx(
+        443_955_411, rel=1e-6
+    )
+
+
+def test_ratio_metric_drops_days_without_a_price() -> None:
+    """A day with no usable price cannot be converted, so it is dropped."""
+    provider = TokenTerminal(api_key="test-token-terminal-key")
+    mock_response = [
+        {"timestamp": "2026-08-01T00:00:00.000Z", "fees": 423_994.0, "price": None},
+        {"timestamp": "2026-08-02T00:00:00.000Z", "fees": 423_331.0, "price": 0},
+        {"timestamp": "2026-08-03T00:00:00.000Z", "fees": 615_367.0, "price": 73.439},
+    ]
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = mock_response
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch.object(provider._session, "get", return_value=mock_resp):
+        rows = provider.fetch_rows("overview_fees", "2026-08-01", "2026-08-03")
+
+    assert [row["date"] for row in rows] == ["2026-08-03"]
+    assert rows[0]["value"] == pytest.approx(8379.3, abs=0.1)

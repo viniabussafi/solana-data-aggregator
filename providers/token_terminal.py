@@ -39,6 +39,21 @@ class TokenTerminal(BaseProvider):
             "date_field": "timestamp",
             "value_field": "active_addresses_daily",
         },
+        "overview_fees": {
+            # Token Terminal publishes Solana fees in USD, built by multiplying the
+            # native SOL amount by that day's SOL price. Dividing the published USD
+            # figure by the same published price recovers the native SOL amount.
+            "metric_id": "fees,price",
+            "date_field": "timestamp",
+            "value_field": ["fees", "price"],
+            "combine": "ratio",
+            "methodology": (
+                "Daily fees in SOL, taken as Token Terminal's USD fee figure divided "
+                "by the same daily SOL price used to build it. Fees are the sum of "
+                "each block's total fee, so base and priority fees are both included, "
+                "and fees paid by vote transactions are included."
+            ),
+        },
         "stablecoin_supply": {
             # Total stablecoin supply = native issuance + bridged-in supply.
             # Token Terminal exposes these as two separate metric_ids; requesting
@@ -67,6 +82,20 @@ class TokenTerminal(BaseProvider):
             "date_field": "timestamp",
             "value_field": "price",
         },
+        "network_total_stake": {
+            # Staking market cap is native staked SOL priced in USD; dividing by the
+            # same published price recovers the staked SOL amount.
+            "metric_id": "staking_market_cap,price",
+            "date_field": "timestamp",
+            "value_field": ["staking_market_cap", "price"],
+            "combine": "ratio",
+            "methodology": (
+                "Total staked SOL, taken as Token Terminal's staking market cap (USD) "
+                "divided by the same daily SOL price used to build it. The underlying "
+                "figure is the SOL held across native stake accounts, so activating "
+                "and deactivating stake are included alongside active stake."
+            ),
+        },
         "network_validator_count": {
             "metric_id": "number_of_validators",
             "date_field": "timestamp",
@@ -87,9 +116,11 @@ class TokenTerminal(BaseProvider):
         "overview_tx_count_vote": (Overview, OverviewMetricType.TX_COUNT_VOTE),
         "overview_sol_price": (Overview, OverviewMetricType.SOL_PRICE),
         "overview_fee_payers": (Overview, OverviewMetricType.FEE_PAYERS),
+        "overview_fees": (Overview, OverviewMetricType.FEES),
         "stablecoin_supply": (Stablecoin, StablecoinMetricType.SUPPLY),
         "defi_dex_volume": (Defi, DefiMetricType.DEX_VOLUME),
         "network_sol_price": (Network, NetworkMetricType.SOL_PRICE),
+        "network_total_stake": (Network, NetworkMetricType.TOTAL_STAKE),
         "network_validator_count": (Network, NetworkMetricType.VALIDATOR_COUNT),
     }
 
@@ -113,6 +144,32 @@ class TokenTerminal(BaseProvider):
     def _resolve_api_key() -> Optional[str]:
         return os.environ.get("TOKEN_TERMINAL_API_KEY")
 
+    @staticmethod
+    def _combine(values: List[Any], mode: str) -> Optional[float]:
+        """Reduce one day's per-field values into a single figure.
+
+        "sum" adds the values that are present. If one series has no value for a
+        date (e.g. bridged stablecoin supply before any bridged stablecoins
+        existed on the chain), the absent series is treated as zero and the day
+        still reports the available total. Only days with no values at all are
+        dropped.
+
+        "ratio" divides the first value by the second, which is how a
+        USD-denominated Token Terminal metric is converted back to SOL. Both
+        values are required, so a day missing either one is dropped rather than
+        reported as a partial figure.
+        """
+        if mode == "ratio":
+            numerator, denominator = values
+            if numerator is None or not denominator:
+                return None
+            return float(numerator) / float(denominator)
+
+        present = [value for value in values if value is not None]
+        if not present:
+            return None
+        return sum(float(value) for value in present)
+
     def _get(self, endpoint: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         url = f"{self.base_url}{endpoint}"
         headers = {
@@ -135,8 +192,9 @@ class TokenTerminal(BaseProvider):
         """Return normalized {"date": str, "value": float} records for the given range (both dates inclusive)."""
         config = self.METRIC_MAP[metric]
         # A metric may map to one or more Token Terminal metric_ids. When several
-        # are provided (e.g. native + bridged stablecoin supply), their per-day
-        # values are summed into a single figure.
+        # are provided, "combine" decides how that day's values are reduced into a
+        # single figure: "sum" (the default) or "ratio". See _combine.
+        combine = config.get("combine", "sum")
         value_fields = config["value_field"]
         if isinstance(value_fields, str):
             value_fields = [value_fields]
@@ -155,16 +213,9 @@ class TokenTerminal(BaseProvider):
             row_date = str(row.get(config["date_field"], ""))[:10]
             if not row_date or not (start_date <= row_date <= end_date):
                 continue
-            # Sum the values that are present for this day. If one series has no
-            # value for a date (e.g. bridged supply on dates before any bridged
-            # stablecoins existed on the chain), the absent series is treated as
-            # zero and the day still reports the available total. Only days with
-            # no values at all for any requested metric are dropped.
-            present = [row.get(field) for field in value_fields]
-            present = [v for v in present if v is not None]
-            if not present:
+            value = self._combine([row.get(field) for field in value_fields], combine)
+            if value is None:
                 continue
-            value = sum(float(v) for v in present)
             result.append({"date": row_date, "value": value})
         return result
 
