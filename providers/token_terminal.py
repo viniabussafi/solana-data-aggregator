@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from metrics.defi import Defi, DefiMetricType
+from metrics.network import Network, NetworkMetricType
 from metrics.overview import Overview, OverviewMetricType
 from metrics.stablecoin import Stablecoin, StablecoinMetricType
 from providers.base import BaseProvider
@@ -61,6 +62,35 @@ class TokenTerminal(BaseProvider):
             "value_field": "ecosystem_dex_trading_volume",
             "methodology": "DEX trade volume varies by indexed venues, pricing, and filtering methodology.",
         },
+        "network_sol_price": {
+            "metric_id": "price",
+            "date_field": "timestamp",
+            "value_field": "price",
+        },
+        "network_validator_count": {
+            "metric_id": "number_of_validators",
+            "date_field": "timestamp",
+            "value_field": "number_of_validators",
+            "methodology": (
+                "Validators are counted from Solana's native rewards system: an "
+                "address counts for a day if it received a voting reward on that "
+                "day, which only happens for validators taking part in consensus. "
+                "Validators that were delinquent for the whole day therefore drop "
+                "out of the count."
+            ),
+        },
+    }
+
+    # Metric key -> (metric model, metric type) used to build the typed record.
+    METRIC_TYPE_MAP: Dict[str, Any] = {
+        "overview_tx_count_total": (Overview, OverviewMetricType.TX_COUNT_TOTAL),
+        "overview_tx_count_vote": (Overview, OverviewMetricType.TX_COUNT_VOTE),
+        "overview_sol_price": (Overview, OverviewMetricType.SOL_PRICE),
+        "overview_fee_payers": (Overview, OverviewMetricType.FEE_PAYERS),
+        "stablecoin_supply": (Stablecoin, StablecoinMetricType.SUPPLY),
+        "defi_dex_volume": (Defi, DefiMetricType.DEX_VOLUME),
+        "network_sol_price": (Network, NetworkMetricType.SOL_PRICE),
+        "network_validator_count": (Network, NetworkMetricType.VALIDATOR_COUNT),
     }
 
     BASE_URL = "https://api.tokenterminal.com/v2"
@@ -140,43 +170,15 @@ class TokenTerminal(BaseProvider):
 
     def get_metric(
         self, metric: str, date: str, chain: str
-    ) -> Stablecoin | Overview | Defi | None:
+    ) -> Stablecoin | Overview | Defi | Network | None:
         """Fetch one metric value and return it as a typed metric model."""
         rows = self.fetch_rows(metric, date, date)
         if not rows:
             return None
 
-        value = rows[0]["value"]
-        parsed_date = datetime.date.fromisoformat(date)
-
-        overview_metric_map: Dict[str, OverviewMetricType] = {
-            "overview_tx_count_total": OverviewMetricType.TX_COUNT_TOTAL,
-            "overview_tx_count_vote": OverviewMetricType.TX_COUNT_VOTE,
-            "overview_sol_price": OverviewMetricType.SOL_PRICE,
-            "overview_fee_payers": OverviewMetricType.FEE_PAYERS,
-        }
-        if metric in overview_metric_map:
-            return Overview.from_metric_type(
-                metric_type=overview_metric_map[metric],
-                date=parsed_date,
-                value=value,
-            )
-
-        defi_metric_map: Dict[str, DefiMetricType] = {
-            "defi_dex_volume": DefiMetricType.DEX_VOLUME,
-        }
-        if metric in defi_metric_map:
-            return Defi.from_metric_type(
-                metric_type=defi_metric_map[metric],
-                date=parsed_date,
-                value=value,
-            )
-
-        stablecoin_metric_map: Dict[str, StablecoinMetricType] = {
-            "stablecoin_supply": StablecoinMetricType.SUPPLY,
-        }
-        return Stablecoin.from_metric_type(
-            metric_type=stablecoin_metric_map[metric],
-            date=parsed_date,
-            value=value,
+        metric_model, metric_type = self.METRIC_TYPE_MAP[metric]
+        return metric_model.from_metric_type(
+            metric_type=metric_type,
+            date=datetime.date.fromisoformat(date),
+            value=rows[0]["value"],
         )
